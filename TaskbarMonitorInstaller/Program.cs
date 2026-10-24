@@ -397,7 +397,7 @@ namespace TaskbarMonitorInstaller
                         key.SetValue("ApplicationVersion", v.ToString());
                         key.SetValue("Publisher", "Leandro Lugarinho");
                         key.SetValue("DisplayIcon", exe);
-                        key.SetValue("DisplayVersion", v.ToString(3));
+                        key.SetValue("DisplayVersion", v.ToString());
                         key.SetValue("URLInfoAbout", "https://lugarinho.tech/tools/taskbar-monitor");
                         key.SetValue("Contact", "leandrosa81@gmail.com");
                         key.SetValue("InstallDate", DateTime.Now.ToString("yyyyMMdd"));

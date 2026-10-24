@@ -124,7 +124,7 @@ namespace TaskbarMonitorWindows11
                         {
                             System.Diagnostics.Process.Start("resmon.exe");
                         }),
-                        new MenuItem(String.Format("About taskbar-monitor (v{0})...", new Version(Properties.Resources.Version).ToString(3)), (e, a) => {
+                        new MenuItem(String.Format("About taskbar-monitor (v{0})...", new Version(Properties.Resources.Version).ToString()), (e, a) => {
                              OpenSettings(3);
                         }),
                         /*

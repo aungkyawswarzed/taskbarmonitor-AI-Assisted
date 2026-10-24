@@ -14,7 +14,7 @@ A Windows taskbar monitor that displays live graphs for CPU, memory, disk, netwo
 
 ## What this fork adds
 
-Version **0.5.6** includes:
+Version **0.5.6.1** includes:
 
 - **Per-counter hover details** — hover a counter to see the top five resource users, grouped by executable name.
   - CPU: top processes by CPU usage.
@@ -28,6 +28,8 @@ Version **0.5.6** includes:
 - Per-monitor DPI awareness and taskbar sizing fixes for high-DPI and high-resolution displays.
 - Safer configuration loading and saving, including recovery from corrupt configuration files.
 - Installer and startup fixes.
+- Update checks now use this fork's GitHub releases, and the About tab links to this repository.
+- Version labels show the full four-part version number.
 
 ### Known limitations
 

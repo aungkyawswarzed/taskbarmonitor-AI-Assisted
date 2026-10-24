@@ -142,7 +142,7 @@ namespace TaskbarMonitor
             this.listSummaryPosition.DataSource = Enum.GetValues(typeof(CounterOptions.DisplayPosition));
             this.listTitlePosition.DataSource = Enum.GetValues(typeof(CounterOptions.DisplayPosition));
 
-            lblVersion.Text = "v" + Version.ToString(3);
+            lblVersion.Text = "v" + Version.ToString();
 
             ActiveCounter = (!string.IsNullOrEmpty(this.listCounters.Text) &&
                              this.Options.CounterOptions.ContainsKey(this.listCounters.Text))
@@ -490,7 +490,7 @@ namespace TaskbarMonitor
 
         private void btnCheckUpdate_Click(object sender, EventArgs e)
         {
-            GithubUpdater update = new GithubUpdater("leandrosa81", "taskbar-monitor");
+            GithubUpdater update = new GithubUpdater("aungkyawswarzed", "taskbarmonitor-AI-Assisted");
 
             if (btnCheckUpdate.Text == "Check for updates")            
             {
@@ -674,7 +674,7 @@ namespace TaskbarMonitor
 
         private void linkLatestVersion_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)
         {
-            GithubUpdater update = new GithubUpdater("leandrosa81", "taskbar-monitor");
+            GithubUpdater update = new GithubUpdater("aungkyawswarzed", "taskbarmonitor-AI-Assisted");
             System.Diagnostics.Process.Start(update.GetURL());
         }
  

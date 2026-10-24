@@ -1227,7 +1227,7 @@
             this.linkLabel2.Size = new System.Drawing.Size(274, 14);
             this.linkLabel2.TabIndex = 6;
             this.linkLabel2.TabStop = true;
-            this.linkLabel2.Text = "https://github.com/leandrosa81/taskbar-monitor";
+            this.linkLabel2.Text = "https://github.com/aungkyawswarzed/taskbarmonitor-AI-Assisted";
             this.linkLabel2.LinkClicked += new System.Windows.Forms.LinkLabelLinkClickedEventHandler(this.linkLabel_LinkClicked);
             // 
             // linkLabel1

@@ -26,7 +26,7 @@ namespace TaskbarMonitor
         public async Task<Version> GetLastestVersionAsync()
         {
             Version latest = null;
-            //https://github.com/leandrosa81/taskbar-monitor/releases    
+            //https://github.com/aungkyawswarzed/taskbarmonitor-AI-Assisted/releases
             System.Net.ServicePointManager.ServerCertificateValidationCallback += (sender, certificate, chain, sslPolicyErrors) => true;
             System.Net.ServicePointManager.Expect100Continue = true;
             System.Net.ServicePointManager.SecurityProtocol = System.Net.SecurityProtocolType.Tls12;
@@ -35,7 +35,7 @@ namespace TaskbarMonitor
                 var result = client.GetAsync(GetURL()).Result;
                 
                 var html = await result.Content.ReadAsStringAsync();
-                //<meta property="og:url" content="/leandrosa81/taskbar-monitor/releases/tag/v0.2.0">
+                //<meta property="og:url" content="/aungkyawswarzed/taskbarmonitor-AI-Assisted/releases/tag/v0.5.6.1">
                 //var tag = @"<meta property=""og:url"" content=""/" + this.user + @"/" + this.project + @"/releases/tag/v" + version.ToString(fieldCount) + @"""";
                 Regex reg = new Regex(@"<meta\sproperty=""og:url""\scontent=""\/" + this.user + @"\/" + this.project + @"\/releases\/tag\/v([\d\.]+)""");
                 var ret = reg.Match(html);
