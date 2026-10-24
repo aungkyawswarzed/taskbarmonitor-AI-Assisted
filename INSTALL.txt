@@ -1,3 +1,10 @@
+UNOFFICIAL AI-ASSISTED FORK
+This is a fork of taskbar-monitor by Leandro Lugarinho (@leandrosa81):
+https://github.com/leandrosa81/taskbar-monitor
+
+All credit for the original project belongs to the original developer. This fork is not affiliated with or endorsed by the original author. The improvements in this fork were developed with AI-assisted code.
+Use at your own risk. This software is provided without warranty.
+
 To use this software, you can use the installer provided, use the batch file or install it manually in your system:
 
 1. installer
