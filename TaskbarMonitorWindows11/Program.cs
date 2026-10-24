@@ -15,9 +15,6 @@ namespace TaskbarMonitorWindows11
     static class Program
     {
 
-        [DllImport("user32.dll")]
-        private static extern bool SetProcessDPIAware();
-
         private static TaskbarManager taskbarManager;
         private static TaskbarMonitorApplicationContext ctx;
         private static Mutex singleInstanceMutex;
@@ -31,8 +28,6 @@ namespace TaskbarMonitorWindows11
         {
             try
             {
-                if (Environment.OSVersion.Version.Major >= 6)
-                    SetProcessDPIAware();
                 if (!TaskbarMonitor.BLL.WindowsInformation.IsWindows11())
                 {
                     MessageBox.Show("Please use this application on Windows 11+ devices only.");
@@ -66,9 +61,8 @@ namespace TaskbarMonitorWindows11
                 
                 taskbarManager = TaskbarManager.GetInstance();                
                 taskbarManager.AddControlsToTaskbars();
+                taskbarManager.StartMonitoring();
 
-                AppDomain.CurrentDomain.ProcessExit += new EventHandler(CurrentDomain_ProcessExit);
-             
                 using (ctx = new TaskbarMonitorApplicationContext())
                 {                    
                     Application.Run(ctx);
@@ -81,7 +75,7 @@ namespace TaskbarMonitorWindows11
             }
             finally 
             { 
-                try { taskbarManager.Dispose(); } catch { }
+                try { taskbarManager?.Dispose(); } catch { }
                 if (singleInstanceMutex != null && isMutexOwner)
                 {
                     try { singleInstanceMutex.ReleaseMutex(); } catch { }
@@ -103,11 +97,6 @@ namespace TaskbarMonitorWindows11
                 r.Show();
                 r.Run();
             }
-        }
-
-        static void CurrentDomain_ProcessExit(object sender, EventArgs e)
-        {            
-            taskbarManager.RemoveControls();
         }
 
         public class TaskbarMonitorApplicationContext : ApplicationContext
@@ -164,7 +153,15 @@ namespace TaskbarMonitorWindows11
                 OptionForm optForm = null;
                 if (qtd.Count() == 0)
                 {
-                    optForm = new OptionForm(taskbarManager.MainControl.Options, taskbarManager.MainControl.customTheme, taskbarManager.MainControl.Version, taskbarManager);
+                    var mainControl = taskbarManager == null ? null : taskbarManager.MainControl;
+                    if (mainControl == null)
+                    {
+                        MessageBox.Show("taskbar-monitor is not attached to the taskbar yet. Please try again in a moment.",
+                            Application.ProductName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        return;
+                    }
+
+                    optForm = new OptionForm(mainControl.Options, mainControl.customTheme, mainControl.Version, taskbarManager);
                     optForm.Show();
                 }
                 else

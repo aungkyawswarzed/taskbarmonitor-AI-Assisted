@@ -1,6 +1,7 @@
 ﻿using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
@@ -17,6 +18,11 @@ namespace TaskbarMonitor
             CUSTOM            
         }
         public static readonly int LATESTOPTIONSVERSION = 5;
+        public const int MinHistorySize = 10;
+        public const int MaxHistorySize = 100;
+        public const int MinPollTime = 1;
+        public const int MaxPollTime = 5;
+
         public int OptionsVersion = LATESTOPTIONSVERSION;
         public Dictionary<string, CounterOptions> CounterOptions { get; set; }
         public int HistorySize { get; set; } = 50;
@@ -28,16 +34,27 @@ namespace TaskbarMonitor
 
         public void CopyTo(Options opt)
         {
+            if (opt == null)
+                return;
+
             opt.HistorySize = this.HistorySize;
             opt.PollTime = this.PollTime;
             opt.ThemeType = this.ThemeType;
+            opt.OptionsVersion = this.OptionsVersion;
+            if (this.CounterOptions == null)
+                this.CounterOptions = new Dictionary<string, CounterOptions>();
+            if (this.MonitorOptions == null)
+                this.MonitorOptions = new Dictionary<string, MonitorOptions>();
             if(opt.CounterOptions == null)
                 opt.CounterOptions = new Dictionary<string, CounterOptions>();
             
             foreach (var item in this.CounterOptions)
             {
-                if (!opt.CounterOptions.ContainsKey(item.Key))
-                    opt.CounterOptions.Add(item.Key, new TaskbarMonitor.CounterOptions());
+                if (item.Value == null)
+                    continue;
+
+                if (!opt.CounterOptions.ContainsKey(item.Key) || opt.CounterOptions[item.Key] == null)
+                    opt.CounterOptions[item.Key] = new TaskbarMonitor.CounterOptions();
 
                 opt.CounterOptions[item.Key].ShowTitle = item.Value.ShowTitle;
                 opt.CounterOptions[item.Key].Enabled = item.Value.Enabled;
@@ -59,8 +76,11 @@ namespace TaskbarMonitor
                 opt.MonitorOptions = new Dictionary<string, MonitorOptions>();
             foreach (var item in this.MonitorOptions)
             {
-                if (!opt.MonitorOptions.ContainsKey(item.Key))
-                    opt.MonitorOptions.Add(item.Key, new TaskbarMonitor.MonitorOptions());
+                if (item.Value == null)
+                    continue;
+
+                if (!opt.MonitorOptions.ContainsKey(item.Key) || opt.MonitorOptions[item.Key] == null)
+                    opt.MonitorOptions[item.Key] = new TaskbarMonitor.MonitorOptions();
 
                 opt.MonitorOptions[item.Key].Enabled = item.Value.Enabled;
                 opt.MonitorOptions[item.Key].Position = item.Value.Position;
@@ -75,6 +95,60 @@ namespace TaskbarMonitor
             }
 
         }
+
+        /// <summary>
+        /// Clamps values that can be edited outside the settings UI (old or
+        /// hand-edited config files) so the rest of the app can rely on them.
+        /// </summary>
+        public void Normalize()
+        {
+            if (HistorySize < MinHistorySize) HistorySize = MinHistorySize;
+            if (HistorySize > MaxHistorySize) HistorySize = MaxHistorySize;
+            if (PollTime < MinPollTime) PollTime = MinPollTime;
+            if (PollTime > MaxPollTime) PollTime = MaxPollTime;
+
+            if (!Enum.IsDefined(typeof(ThemeList), ThemeType))
+                ThemeType = ThemeList.AUTOMATIC;
+
+            if (CounterOptions == null)
+                CounterOptions = new Dictionary<string, CounterOptions>();
+            foreach (var key in CounterOptions.Keys.ToList())
+            {
+                if (CounterOptions[key] == null)
+                    CounterOptions[key] = new CounterOptions();
+            }
+
+            if (MonitorOptions == null)
+                MonitorOptions = new Dictionary<string, MonitorOptions>();
+            foreach (var key in MonitorOptions.Keys.ToList())
+            {
+                if (MonitorOptions[key] == null)
+                    MonitorOptions[key] = new MonitorOptions();
+            }
+        }
+
+        /// <summary>
+        /// Adds counters that exist on this machine but are missing from an old
+        /// config file. Existing entries (including disabled ones) are kept.
+        /// </summary>
+        public void MergeDefaults(Options defaults)
+        {
+            if (defaults == null)
+                return;
+
+            if (CounterOptions == null)
+                CounterOptions = new Dictionary<string, CounterOptions>();
+
+            if (defaults.CounterOptions != null)
+            {
+                foreach (var item in defaults.CounterOptions)
+                {
+                    if (!CounterOptions.ContainsKey(item.Key))
+                        CounterOptions[item.Key] = item.Value;
+                }
+            }
+        }
+
         public static Options DefaultOptions()
         {
             var opt = new Options
@@ -194,20 +268,45 @@ namespace TaskbarMonitor
         }
         public static Options ReadFromDisk()
         {
-            Options opt = DefaultOptions();
+            Options defaults = DefaultOptions();
+            Options opt = defaults;
+            bool needSave = false;
 
             var folder = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "taskbar-monitor");
             var origin = System.IO.Path.Combine(folder, "config.json");
             if (System.IO.File.Exists(origin))
             {
-                opt = JsonConvert.DeserializeObject<Options>(System.IO.File.ReadAllText(origin));
-                
+                try
+                {
+                    var loaded = JsonConvert.DeserializeObject<Options>(System.IO.File.ReadAllText(origin));
+                    if (loaded == null)
+                        throw new System.IO.InvalidDataException("The configuration file is empty.");
+
+                    opt = loaded;
+                }
+                catch (Exception ex)
+                {
+                    // A corrupt or partially written config must not prevent the
+                    // widget from starting. Keep a copy for the user and fall
+                    // back to defaults.
+                    Debug.WriteLine("Unable to read configuration: " + ex);
+                    try { System.IO.File.Copy(origin, origin + ".bad", true); } catch { }
+                    opt = defaults;
+                    needSave = true;
+                }
             }
             else
             {
                 // save to disk with default options
-                opt.SaveToDisk();
+                needSave = true;
             }
+
+            opt.Normalize();
+            opt.MergeDefaults(defaults);
+
+            if (needSave)
+                opt.SaveToDisk();
+
             return opt;
         }
         public bool Upgrade(GraphTheme graphTheme)
@@ -220,17 +319,28 @@ namespace TaskbarMonitor
         }
         public bool SaveToDisk()
         {
-            var folder = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "taskbar-monitor");
-            var origin = System.IO.Path.Combine(folder, "config.json");
-            if (!System.IO.Directory.Exists(folder))
-                System.IO.Directory.CreateDirectory(folder);
+            try
+            {
+                var folder = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "taskbar-monitor");
+                var origin = System.IO.Path.Combine(folder, "config.json");
+                if (!System.IO.Directory.Exists(folder))
+                    System.IO.Directory.CreateDirectory(folder);
 
-            System.IO.File.WriteAllText(origin, JsonConvert.SerializeObject(this, Formatting.Indented));
-            return true;
+                System.IO.File.WriteAllText(origin, JsonConvert.SerializeObject(this, Formatting.Indented));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("Unable to save configuration: " + ex);
+                return false;
+            }
         }
         private bool _Upgrade(GraphTheme graphTheme)
         {
             var ret = false;
+            if (CounterOptions == null)
+                CounterOptions = new Dictionary<string, CounterOptions>();
+
             if(this.OptionsVersion <= 1)
             {
                 if (GraphTheme.IsCustom(graphTheme))
@@ -285,18 +395,25 @@ namespace TaskbarMonitor
                 int i = 0;
                 foreach (var item in this.CounterOptions)
                 {
+                    if (item.Value == null)
+                        continue;
                     item.Value.Order = i++;
                 }
                 ret = true;
             }
             if (this.OptionsVersion <= 5)
             {
+                bool changed = false;
                 foreach (var item in this.CounterOptions)
                 {
-                    if (item.Key.StartsWith("GPU") && item.Value.GraphType != Counters.ICounter.CounterType.SINGLE)
+                    if (item.Value != null && item.Key.StartsWith("GPU") && item.Value.GraphType != Counters.ICounter.CounterType.SINGLE)
+                    {
                         item.Value.GraphType = Counters.ICounter.CounterType.SINGLE;
+                        changed = true;
+                    }
                 }
-                
+                if (changed)
+                    ret = true;
             }
             this.OptionsVersion = LATESTOPTIONSVERSION;              
             return ret;

@@ -201,7 +201,7 @@ namespace TaskbarMonitorInstaller
             else
             {
                 // then we terminate existing processes
-                KillProcess("TaskbarMonitorWindows11.exe");
+                KillProcess("TaskbarMonitorWindows11");
 
                 DeleteFiles(info);
                 if (Directory.Exists(info.LegacyTargetPath))
@@ -401,7 +401,7 @@ namespace TaskbarMonitorInstaller
                         key.SetValue("URLInfoAbout", "https://lugarinho.tech/tools/taskbar-monitor");
                         key.SetValue("Contact", "leandrosa81@gmail.com");
                         key.SetValue("InstallDate", DateTime.Now.ToString("yyyyMMdd"));
-                        key.SetValue("UninstallString", exe + " /uninstall");
+                        key.SetValue("UninstallString", "\"" + exe + "\" /uninstall");
                     }
                     finally
                     {

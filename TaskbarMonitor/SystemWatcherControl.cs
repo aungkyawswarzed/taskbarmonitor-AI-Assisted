@@ -6,6 +6,7 @@ using System.Drawing;
 using System.Linq;
 using System.Threading;
 using System.Windows.Forms;
+using TaskbarMonitor.Usage;
 
 // control architecture
 
@@ -27,8 +28,49 @@ namespace TaskbarMonitor
         [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
         public Options Options { get; set; }
 
+        /// <summary>
+        /// Handle of the taskbar window this control is attached to. It is used
+        /// to read the taskbar geometry and DPI of the monitor it is displayed on.
+        /// </summary>
+        [Browsable(false)]
+        [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+        public IntPtr TaskbarWindowHandle { get; set; } = IntPtr.Zero;
+
+        /// <summary>
+        /// DPI scale (1.0 == 96 DPI) of the monitor this control is displayed on.
+        /// </summary>
+        [Browsable(false)]
+        [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+        public float DisplayScale
+        {
+            get
+            {
+                UpdateDisplayScale();
+                return displayScale;
+            }
+        }
+
+        /// <summary>
+        /// Width needed by this control (in device pixels) for the current
+        /// options and monitor DPI.
+        /// </summary>
+        [Browsable(false)]
+        [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+        public int DesiredWidth
+        {
+            get
+            {
+                UpdateDisplayScale();
+                return (GraphWidth + CounterSpacing) * CountersCount;
+            }
+        }
+
         private bool _previewMode = false;
         private ContextMenu _contextMenu = null;
+        private float displayScale = 1f;
+        private int lastTaskbarThickness;
+        private bool disposeSubscribed = false;
+        private bool componentsInitialized = false;
 
         [Browsable(false)]
         [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
@@ -54,22 +96,64 @@ namespace TaskbarMonitor
         {
             get
             {
-                if (Monitor?.Counters == null) return 0;
-                return Options.CounterOptions.Where(x => x.Value.Enabled == true).Count();
+                if (Monitor == null || !Monitor.HasCounters || Options == null || Options.CounterOptions == null)
+                    return 0;
+
+                return Options.CounterOptions.Count(x => x.Value != null && x.Value.Enabled);
                 //return Counters.Count;
             }
+        }
+
+        // All metrics below are expressed in device pixels and derive from the
+        // DPI scale of the monitor that owns this taskbar.
+        private int HistorySizeOption
+        {
+            get { return Options != null ? Options.HistorySize : 40; }
+        }
+
+        private int GraphWidth
+        {
+            get { return Math.Max(4, (int)Math.Round(HistorySizeOption * displayScale)); }
+        }
+
+        private int CounterSpacing
+        {
+            get { return Math.Max(3, (int)Math.Round(10 * displayScale)); }
+        }
+
+        private int BarWidth
+        {
+            get { return Math.Max(1, (int)Math.Round(4 * displayScale)); }
+        }
+
+        private int VerticalRowHeight
+        {
+            get { return Math.Max(10, (int)Math.Round(30 * displayScale)); }
         }
         
         System.Drawing.Font fontCounter;
         Font fontTitle;
         int lastSize = 30;
         bool mouseOver = false;
+
+        private ProcessUsageService processUsageService;
+        private ProcessUsagePopup processUsagePopup;
+        private System.Windows.Forms.Timer processUsageTimer;
+        private string hoveredCounterName;
+        private bool processUsageStarted;
+        private readonly List<CounterLayout> counterLayouts = new List<CounterLayout>();
+
+        private sealed class CounterLayout
+        {
+            public string Name;
+            public Rectangle Bounds;
+        }
+
         public GraphTheme customTheme;
         GraphTheme darkTheme;
         GraphTheme lightTheme;
 
         GraphTheme defaultTheme;
-
 
         Deskband AssociatedDeskband = null;
         TaskbarManager sTask;
@@ -93,27 +177,58 @@ namespace TaskbarMonitor
 
         public void AttachMonitor(Monitor monitor)
         {
-            Disposed += OnDispose;
-            this.Monitor = monitor;
+            // The settings form calls AttachMonitor again when it is reloaded
+            // (Reset defaults). Re-subscribing here used to duplicate handlers
+            // and timers.
+            if (this.Monitor == monitor && this.Options != null)
+                return;
+
             if (this.Monitor != null)
-            {                
-                this.SetStyle(ControlStyles.EnableNotifyMessage, true);
+                this.Monitor.OnMonitorUpdated -= Monitor_OnMonitorUpdated;
+
+            this.Monitor = monitor;
+            if (this.Monitor == null)
+                return;
+
+            if (!disposeSubscribed)
+            {
+                Disposed += OnDispose;
+                disposeSubscribed = true;
+            }
+
+            this.SetStyle(ControlStyles.EnableNotifyMessage, true);
+            try
+            {
+                Options opt = monitor.Options ?? Options.DefaultOptions();
+                darkTheme = GraphTheme.DefaultDarkTheme();
+                lightTheme = GraphTheme.DefaultLightTheme();
                 try
                 {
-                    Options opt = monitor.Options;
-                    darkTheme = GraphTheme.DefaultDarkTheme();
-                    lightTheme = GraphTheme.DefaultLightTheme();
                     customTheme = GraphTheme.ReadFromDisk();
-                    opt.Upgrade(customTheme);
-
-                    Initialize(opt);
-                    this.BackColor = Color.Transparent;
-                    monitor.OnMonitorUpdated += Monitor_OnMonitorUpdated;
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show($"Error loading SystemWatcherControl: {ex.Message}", Application.ProductName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    System.Diagnostics.Debug.WriteLine("Unable to read custom theme: " + ex);
+                    customTheme = GraphTheme.DefaultDarkTheme();
                 }
+
+                try
+                {
+                    opt.Upgrade(customTheme);
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine("Unable to upgrade options: " + ex);
+                }
+
+                Initialize(opt);
+                this.BackColor = Color.Transparent;
+                monitor.OnMonitorUpdated -= Monitor_OnMonitorUpdated;
+                monitor.OnMonitorUpdated += Monitor_OnMonitorUpdated;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error loading SystemWatcherControl: {ex.Message}", Application.ProductName, MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -121,15 +236,43 @@ namespace TaskbarMonitor
         {
             if(Monitor != null)
                 Monitor.OnMonitorUpdated -= Monitor_OnMonitorUpdated;
-            if(BLL.WindowsInformation.IsWindows11())
-                StopMousePolling();
+
+            StopMousePolling();
+            DisposeProcessUsage();
+
+            Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= SystemEvents_DisplaySettingsChanged;
+
+            if (_contextMenu != null)
+            {
+                this.ContextMenu = null;
+                _contextMenu.Dispose();
+                _contextMenu = null;
+            }
+
+            if (fontTitle != null)
+            {
+                fontTitle.Dispose();
+                fontTitle = null;
+            }
+            if (fontCounter != null)
+            {
+                fontCounter.Dispose();
+                fontCounter = null;
+            }
         }
 
         private void Monitor_OnMonitorUpdated()
         {
-            if (Options != null && this.Options.ThemeType == Options.ThemeList.AUTOMATIC)
+            try
             {
-                this.defaultTheme = GetTheme(this.Options);
+                if (Options != null && this.Options.ThemeType == Options.ThemeList.AUTOMATIC)
+                {
+                    this.defaultTheme = GetTheme(this.Options);
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine("Unable to refresh the theme: " + ex);
             }
 
             this.Invalidate();
@@ -152,9 +295,17 @@ namespace TaskbarMonitor
             }
             else if (opt.ThemeType == Options.ThemeList.CUSTOM)
             {
-                customTheme = GraphTheme.ReadFromDisk();
-                opt.Upgrade(customTheme);
-                theme = customTheme;
+                try
+                {
+                    customTheme = GraphTheme.ReadFromDisk();
+                    opt.Upgrade(customTheme);
+                    theme = customTheme;
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine("Unable to load the custom theme: " + ex);
+                    theme = darkTheme;
+                }
             }
             else if (opt.ThemeType == Options.ThemeList.AUTOMATIC)
             {
@@ -194,31 +345,39 @@ namespace TaskbarMonitor
                 }
                 else
                 {
-                    // Sample several points along the taskbar and average their luminance
-                    var taskbarRect = BLL.Win32Api.GetTaskbarPosition();
-                    int sampleCount = 5;
-                    double totalLuminance = 0;
-                    for (int i = 0; i < sampleCount; i++)
+                    try
                     {
-                        int x, y;
-                        if (taskbarRect.Width > taskbarRect.Height)
+                        // Sample several points along the taskbar and average their luminance
+                        var taskbarRect = BLL.Win32Api.GetTaskbarPosition();
+                        int sampleCount = 5;
+                        double totalLuminance = 0;
+                        for (int i = 0; i < sampleCount; i++)
                         {
-                            // Horizontal taskbar (bottom or top)
-                            x = taskbarRect.Left + (i * taskbarRect.Width) / (sampleCount - 1);
-                            y = taskbarRect.Top + taskbarRect.Height / 2;
+                            int x, y;
+                            if (taskbarRect.Width > taskbarRect.Height)
+                            {
+                                // Horizontal taskbar (bottom or top)
+                                x = taskbarRect.Left + (i * taskbarRect.Width) / (sampleCount - 1);
+                                y = taskbarRect.Top + taskbarRect.Height / 2;
+                            }
+                            else
+                            {
+                                // Vertical taskbar (left or right)
+                                x = taskbarRect.Left + taskbarRect.Width / 2;
+                                y = taskbarRect.Top + (i * taskbarRect.Height) / (sampleCount - 1);
+                            }
+                            Color color = BLL.Win32Api.GetColourAt(new Point(x, y));
+                            double luminance = 0.2126 * color.R + 0.7152 * color.G + 0.0722 * color.B;
+                            totalLuminance += luminance;
                         }
-                        else
-                        {
-                            // Vertical taskbar (left or right)
-                            x = taskbarRect.Left + taskbarRect.Width / 2;
-                            y = taskbarRect.Top + (i * taskbarRect.Height) / (sampleCount - 1);
-                        }
-                        Color color = BLL.Win32Api.GetColourAt(new Point(x, y));
-                        double luminance = 0.2126 * color.R + 0.7152 * color.G + 0.0722 * color.B;
-                        totalLuminance += luminance;
+                        double avgLuminance = totalLuminance / sampleCount;
+                        theme = avgLuminance > 128 ? lightTheme : darkTheme;
                     }
-                    double avgLuminance = totalLuminance / sampleCount;
-                    theme = avgLuminance > 128 ? lightTheme : darkTheme;
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine("Unable to sample the taskbar: " + ex);
+                        theme = darkTheme;
+                    }
                 }
             }
             return theme;
@@ -226,26 +385,188 @@ namespace TaskbarMonitor
 
 
 
+        /// <summary>
+        /// Thickness of the taskbar at 100% DPI for the current Windows version.
+        /// Used as the reference for the taskbar based scale.
+        /// </summary>
+        private static float StandardTaskbarThickness
+        {
+            get { return BLL.WindowsInformation.IsWindows11() ? 48f : 40f; }
+        }
+
+        private void UpdateDisplayScale()
+        {
+            Screen screen = GetTargetScreen();
+
+            float dpiScale;
+            try
+            {
+                if (TaskbarWindowHandle != IntPtr.Zero)
+                    dpiScale = BLL.DisplayInfo.GetScaleForWindow(TaskbarWindowHandle);
+                else if (this.IsHandleCreated)
+                    dpiScale = BLL.DisplayInfo.GetScaleForWindow(this.Handle);
+                else if (this.AssociatedDeskband != null)
+                    dpiScale = BLL.DisplayInfo.GetScaleForScreen(screen);
+                else
+                    dpiScale = BLL.DisplayInfo.GetScaleForControl(this);
+            }
+            catch
+            {
+                dpiScale = BLL.DisplayInfo.SystemScale;
+            }
+
+            // The settings preview is not hosted by a taskbar and has a fixed
+            // size in its form, so only follow the form's DPI.
+            if (PreviewMode)
+            {
+                displayScale = BLL.DisplayInfo.NormalizeScale(dpiScale);
+                return;
+            }
+
+            // The taskbar itself grows with the DPI and with the "taskbar size"
+            // preference. Using its thickness as a scale source keeps the graphs
+            // proportional to the other taskbar elements (clock, tray icons).
+            float taskbarScale = 1f;
+            int taskbarWidth, taskbarHeight;
+            GetTaskbarMetrics(out taskbarWidth, out taskbarHeight);
+            int thickness = taskbarWidth > 0 ? taskbarWidth : taskbarHeight;
+            if (thickness >= 20)
+                taskbarScale = thickness / StandardTaskbarThickness;
+
+            // High resolution displays get proportionally larger graphs, even
+            // when Windows is set to 100% scaling (e.g. 2560x1440 or 3840x2160).
+            float resolutionScale = BLL.DisplayInfo.GetResolutionScale(screen);
+
+            float scale = Math.Max(dpiScale, Math.Max(taskbarScale, resolutionScale));
+            displayScale = BLL.DisplayInfo.NormalizeScale(scale);
+        }
+
+        private void CreateFonts()
+        {
+            if (defaultTheme == null)
+                return;
+
+            // Use pixel units so the rendered size depends only on our DPI
+            // scale and not on the DPI awareness of the hosting process.
+            // The size is capped so the two possible text lines (title and
+            // current value) always fit inside the taskbar, even on very large
+            // displays where the resolution scale is bigger than the taskbar.
+            float maxPixels = MaxFontPixels();
+            float titlePixels = Math.Max(1f, Math.Min((float)(defaultTheme.TitleSize * 96.0 / 72.0) * displayScale, maxPixels));
+            float valuePixels = Math.Max(1f, Math.Min((float)(defaultTheme.CurrentValueSize * 96.0 / 72.0) * displayScale, maxPixels));
+
+            var oldTitle = fontTitle;
+            var oldCounter = fontCounter;
+
+            fontTitle = new Font(defaultTheme.TitleFont, titlePixels, defaultTheme.TitleFontStyle, GraphicsUnit.Pixel);
+            fontCounter = new Font(defaultTheme.CurrentValueFont, valuePixels, defaultTheme.CurrentValueFontStyle, GraphicsUnit.Pixel);
+
+            oldTitle?.Dispose();
+            oldCounter?.Dispose();
+        }
+
+        /// <summary>
+        /// Maximum size in pixels for a text line so that a title and a value
+        /// fit in the taskbar thickness.
+        /// </summary>
+        private float MaxFontPixels()
+        {
+            float thickness;
+            if (PreviewMode)
+            {
+                thickness = this.Height > 0 ? this.Height : 30f;
+            }
+            else
+            {
+                int taskbarWidth, taskbarHeight;
+                GetTaskbarMetrics(out taskbarWidth, out taskbarHeight);
+                thickness = taskbarWidth > 0 ? taskbarWidth : taskbarHeight;
+                if (thickness <= 0)
+                    thickness = StandardTaskbarThickness * displayScale;
+            }
+
+            return Math.Max(6f, thickness * 0.45f);
+        }
+
+        /// <summary>
+        /// Recomputes the DPI dependent metrics (used when the taskbar moves to
+        /// another monitor or when display scaling changes).
+        /// </summary>
+        public void RefreshDisplayMetrics()
+        {
+            if (this.IsDisposed || this.Disposing)
+                return;
+
+            UpdateDisplayScale();
+            // RefreshDisplayMetrics is only called when the display or the
+            // taskbar changes, so the fonts can be recreated unconditionally
+            // (the maximum size depends on the taskbar thickness too).
+            CreateFonts();
+
+            AdjustControlSize();
+            this.Invalidate();
+        }
+
+        private void SystemEvents_DisplaySettingsChanged(object sender, EventArgs e)
+        {
+            try
+            {
+                if (this.IsDisposed || this.Disposing)
+                    return;
+
+                if (this.InvokeRequired)
+                    this.BeginInvoke((MethodInvoker)RefreshDisplayMetrics);
+                else
+                    RefreshDisplayMetrics();
+            }
+            catch { }
+        }
+
+        protected override void OnDpiChangedAfterParent(EventArgs e)
+        {
+            base.OnDpiChangedAfterParent(e);
+            RefreshDisplayMetrics();
+        }
+
         public bool IsCustomTheme()
         {
             return GraphTheme.IsCustom(this.defaultTheme);
         }
         public void ApplyOptions(Options Options)
         {            
+            if (Options == null)
+                return;
+
             ApplyOptions(Options, GetTheme(Options));
         }
 
         public void ApplyOptions(Options Options, GraphTheme theme)
         {
-            this.Monitor.UpdateOptions(Options);            
+            if (Options == null)
+                return;
+
+            HideProcessUsage();
+
+            // The settings preview is a copy and must not change the live
+            // monitor (polling interval / counter set). The real controls apply
+            // the options on OK/Apply.
+            if (!PreviewMode && this.Monitor != null)
+                this.Monitor.UpdateOptions(Options);
+
             this.Options = Options;
             this.defaultTheme = theme;
 
-            fontTitle = new Font(defaultTheme.TitleFont, defaultTheme.TitleSize, defaultTheme.TitleFontStyle);
-            fontCounter = new Font(defaultTheme.CurrentValueFont, defaultTheme.CurrentValueSize, defaultTheme.CurrentValueFontStyle);
+            UpdateDisplayScale();
+            CreateFonts();
 
             if (!PreviewMode)
             {
+                if (_contextMenu != null)
+                {
+                    this.ContextMenu = null;
+                    _contextMenu.Dispose();
+                }
+
                 _contextMenu = new ContextMenu();
                 _contextMenu.MenuItems.Add(new MenuItem("Settings...", MenuItem_Settings_onClick));
                 _contextMenu.MenuItems.Add(new MenuItem("Open Task Manager...", (e, a) =>
@@ -268,9 +589,17 @@ namespace TaskbarMonitor
             {
                 this.ContextMenu = null;
 
-                var pos = BLL.Win32Api.GetTaskbarPosition();
-                Color taskBarColour = BLL.Win32Api.GetColourAt(new Point(pos.Location.X + 1, pos.Location.Y + 1));
-                this.BackColor = taskBarColour;
+                try
+                {
+                    var pos = BLL.Win32Api.GetTaskbarPosition();
+                    Color taskBarColour = BLL.Win32Api.GetColourAt(new Point(pos.Location.X + 1, pos.Location.Y + 1));
+                    this.BackColor = taskBarColour;
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine("Unable to sample the taskbar colour: " + ex);
+                    this.BackColor = Color.Transparent;
+                }
             }
             
             AdjustControlSize();
@@ -295,7 +624,21 @@ namespace TaskbarMonitor
             ApplyOptions(opt, theme);
             //Initialize();
 
-            InitializeComponent();
+            if (!componentsInitialized)
+            {
+                InitializeComponent();
+                componentsInitialized = true;
+            }
+
+            // All scaling is done explicitly from DisplayInfo so WinForms must
+            // not scale taskbar controls behind our back. The settings preview
+            // keeps AutoScaleMode.Dpi so it stays consistent with its form.
+            if (!PreviewMode)
+                this.AutoScaleMode = AutoScaleMode.None;
+
+            Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= SystemEvents_DisplaySettingsChanged;
+            Microsoft.Win32.SystemEvents.DisplaySettingsChanged += SystemEvents_DisplaySettingsChanged;
+
             AdjustControlSize();
             if (BLL.WindowsInformation.IsWindows11())
                 StartMousePolling();
@@ -305,45 +648,54 @@ namespace TaskbarMonitor
 
         private void AdjustControlSize()
         {
-            if (PreviewMode)
+            float oldScale = displayScale;
+            UpdateDisplayScale();
+            if (Math.Abs(oldScale - displayScale) > 0.001f)
+                CreateFonts();
+
+            if (PreviewMode || Options == null)
                 return;
-            int taskbarWidth = GetTaskbarWidth();
-            taskbarHeight = GetTaskbarHeight();
+
+            int taskbarWidth, taskbarHeight;
+            GetTaskbarMetrics(out taskbarWidth, out taskbarHeight);
+            this.taskbarHeight = taskbarHeight;
 
             // taskbar not being shown
             if(taskbarWidth == 0 && taskbarHeight == 0)
             {
                 return;
             }
-            int minimumHeight = taskbarHeight;            
-            if (minimumHeight < 20)
-                minimumHeight = 20;
 
             if (taskbarWidth > 0 && taskbarHeight == 0)
                 VerticalTaskbarMode = true;
             else if (taskbarWidth == 0 && taskbarHeight > 0)
                 VerticalTaskbarMode = false;
 
-            int counterSize = (Options.HistorySize + 10);
-            int controlWidth = counterSize * CountersCount;
-            int controlHeight = minimumHeight;
+            int counterSize = GraphWidth + CounterSpacing;
+            int countersCount = CountersCount;
+            if (countersCount <= 0)
+                countersCount = 1;
 
-            if (VerticalTaskbarMode && taskbarWidth < controlWidth)
-            {
-                int countersPerLine = Convert.ToInt32(Math.Floor((float)taskbarWidth / (float)counterSize));
-                controlWidth = counterSize * countersPerLine;
-                controlHeight = Convert.ToInt32(Math.Ceiling((float)CountersCount / (float)countersPerLine)) * (30 + 10);
-            }
+            int controlWidth = counterSize * countersCount;
+            int controlHeight = taskbarHeight;
+
             if (VerticalTaskbarMode)
             {
-                this.Left = 5;
-                controlWidth = controlWidth - 5;
+                int countersPerLine = Math.Max(1, (int)Math.Floor((float)taskbarWidth / (float)counterSize));
+                int lines = (int)Math.Ceiling((float)countersCount / (float)countersPerLine);
+
+                controlWidth = counterSize * Math.Min(countersPerLine, countersCount);
+                controlHeight = lines * (VerticalRowHeight + CounterSpacing);
+
+                this.Left = Math.Max(0, (int)Math.Round(5 * displayScale));
+                controlWidth = Math.Max(1, controlWidth - this.Left);
             }
-            else 
-            { 
-                this.Top = 1;
-                controlHeight = controlHeight - 2;
+            else
+            {
+                this.Top = Math.Max(0, (int)Math.Round(1 * displayScale));
+                controlHeight = Math.Max(1, controlHeight - (int)Math.Round(2 * displayScale));
             }
+
             if (this.Size.Width != controlWidth || this.Size.Height != controlHeight)
             {
                 this.Size = new Size(controlWidth, controlHeight);
@@ -352,9 +704,101 @@ namespace TaskbarMonitor
             }
         }
 
+        /// <summary>
+        /// Returns the taskbar thickness for the monitor this control is on.
+        /// Vertical taskbars report their width, horizontal taskbars their height.
+        /// </summary>
+        private void GetTaskbarMetrics(out int taskbarWidth, out int taskbarHeight)
+        {
+            taskbarWidth = 0;
+            taskbarHeight = 0;
+
+            Rectangle rect = Rectangle.Empty;
+            if (TaskbarWindowHandle != IntPtr.Zero)
+                rect = BLL.Win32Api.GetWindowSize(TaskbarWindowHandle);
+
+            int thickness = 0;
+            if (rect.Width > 0 && rect.Height > 0)
+            {
+                // The taskbar window spans the whole edge, so the smaller
+                // dimension is its thickness.
+                thickness = rect.Width >= rect.Height ? rect.Height : rect.Width;
+            }
+
+            if (thickness < 10)
+            {
+                // An auto-hidden taskbar is only a few pixels thick. Prefer the
+                // difference between the screen bounds and its working area.
+                var screen = GetTargetScreen();
+                int diffWidth = Math.Max(0, screen.Bounds.Width - screen.WorkingArea.Width);
+                int diffHeight = Math.Max(0, screen.Bounds.Height - screen.WorkingArea.Height);
+
+                if (diffHeight > 0 && diffWidth == 0)
+                {
+                    taskbarHeight = diffHeight;
+                    lastTaskbarThickness = diffHeight;
+                    return;
+                }
+
+                if (diffWidth > 0 && diffHeight == 0)
+                {
+                    taskbarWidth = diffWidth;
+                    lastTaskbarThickness = diffWidth;
+                    return;
+                }
+            }
+
+            if (thickness < 10)
+                thickness = lastTaskbarThickness;
+
+            if (thickness < 10)
+            {
+                // Last resort: use the standard taskbar thickness for this
+                // display's DPI (48 px on Windows 11, 40 px on Windows 10).
+                float dpiScale = BLL.DisplayInfo.GetScaleForScreen(GetTargetScreen());
+                thickness = Math.Max(20, (int)Math.Round(StandardTaskbarThickness * dpiScale));
+            }
+
+            if (thickness > 0)
+                lastTaskbarThickness = thickness;
+
+            var targetScreen = GetTargetScreen();
+            int workingWidth = targetScreen.Bounds.Width - targetScreen.WorkingArea.Width;
+            int workingHeight = targetScreen.Bounds.Height - targetScreen.WorkingArea.Height;
+
+            if (workingWidth > 0 && workingHeight == 0)
+                taskbarWidth = thickness;
+            else if (workingHeight > 0 && workingWidth == 0)
+                taskbarHeight = thickness;
+            else if (rect.Width > 0 && rect.Height > 0 && rect.Width < rect.Height)
+                taskbarWidth = thickness;
+            else
+                taskbarHeight = thickness;
+        }
+
+        private Screen GetTargetScreen()
+        {
+            if (TaskbarWindowHandle != IntPtr.Zero)
+                return Screen.FromHandle(TaskbarWindowHandle);
+
+            // Use the control's own handle once it exists (deskband case).
+            // Screen.FromControl is intentionally avoided before that because
+            // it would create the window handle before it is parented to the
+            // taskbar, i.e. on the wrong monitor.
+            if (this.IsHandleCreated)
+                return Screen.FromHandle(this.Handle);
+
+            return Screen.PrimaryScreen;
+        }
+
         protected override void OnPaint(PaintEventArgs e)
         {
-            var maximumHeight = VerticalTaskbarMode ? 30 : this.Height;
+            float oldScale = displayScale;
+            UpdateDisplayScale();
+            if (Math.Abs(oldScale - displayScale) > 0.001f)
+                CreateFonts();
+
+            var maximumHeight = VerticalTaskbarMode ? VerticalRowHeight : this.Height;
 
             int graphPosition = 0;
             int graphPositionY = 0;
@@ -365,6 +809,7 @@ namespace TaskbarMonitor
 
             //formGraphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;//AntiAliasGridFit;
             formGraphics.Clear(Color.Transparent);
+            counterLayouts.Clear();
             if (SHOW_DEBUG)
             {
                 using (SolidBrush BrushText = new SolidBrush(defaultTheme.TextColor))
@@ -387,17 +832,25 @@ namespace TaskbarMonitor
             }
             else
             {
-                if (Options == null)
+                if (Options == null || Options.CounterOptions == null)
                 {
                     base.OnPaint(e);
                     return;
                 }
-                foreach (var pair in Options.CounterOptions.Where(x => x.Value.Enabled == true).OrderBy(x => x.Value.Order))
+                foreach (var pair in Options.CounterOptions.Where(x => x.Value != null && x.Value.Enabled == true).OrderBy(x => x.Value.Order))
                 {
                     var name = pair.Key;
                     var opt = pair.Value;
-                    var ct = Monitor.Counters.Where(x => x.GetName() == name).SingleOrDefault();
+                    var ct = Monitor == null ? null : Monitor.GetCounter(name);
                     if (ct == null) continue;
+
+                    counterLayouts.Add(new CounterLayout
+                    {
+                        Name = name,
+                        Bounds = new Rectangle(graphPosition, graphPositionY,
+                            Math.Max(1, GraphWidth + CounterSpacing),
+                            Math.Max(1, maximumHeight))
+                    });
 
                     var infos = ct.Infos;
                     //var opt = Options.CounterOptions[ct.GetName()];
@@ -473,12 +926,12 @@ namespace TaskbarMonitor
                             int offset = 1;
                             if (!mouseOver)
                                 offset = 0;
-                               formGraphics.DrawString(ct.GetLabel(), fontTitle, brushShadow, new RectangleF(graphPosition + (Options.HistorySize / 2) - (sizeTitle.Width / 2) + offset, positions[opt.TitlePosition] + offset, sizeTitle.Width, maximumHeight), new StringFormat());
+                               formGraphics.DrawString(ct.GetLabel(), fontTitle, brushShadow, new RectangleF(graphPosition + (GraphWidth / 2) - (sizeTitle.Width / 2) + offset, positions[opt.TitlePosition] + offset, sizeTitle.Width, maximumHeight), new StringFormat());
                             }
                             // show title only on SHOW, or (HOVER and mouseover)
                             if ((opt.ShowTitle == CounterOptions.DisplayType.HOVER && mouseOver) || opt.ShowTitle == CounterOptions.DisplayType.SHOW)
                             {
-                                formGraphics.DrawString(ct.GetLabel(), fontTitle, brushTitle, new RectangleF(graphPosition + (Options.HistorySize / 2) - (sizeTitle.Width / 2), positions[opt.TitlePosition], sizeTitle.Width, maximumHeight), new StringFormat());
+                                formGraphics.DrawString(ct.GetLabel(), fontTitle, brushTitle, new RectangleF(graphPosition + (GraphWidth / 2) - (sizeTitle.Width / 2), positions[opt.TitlePosition], sizeTitle.Width, maximumHeight), new StringFormat());
                             }
                         //}
                         
@@ -537,11 +990,11 @@ namespace TaskbarMonitor
                                 int offset = 1;
                                 if (!mouseOver)
                                     offset = 0;
-                                formGraphics.DrawString(text, fontCounter, BrushTextShadow, new RectangleF(graphPosition + (Options.HistorySize / 2) - (sizeString.Width / 2) + offset, ypos + offset, sizeString.Width, maximumHeight), new StringFormat());
+                                formGraphics.DrawString(text, fontCounter, BrushTextShadow, new RectangleF(graphPosition + (GraphWidth / 2) - (sizeString.Width / 2) + offset, ypos + offset, sizeString.Width, maximumHeight), new StringFormat());
                             }
                             if ((opt.ShowCurrentValue == CounterOptions.DisplayType.HOVER && mouseOver) || opt.ShowCurrentValue == CounterOptions.DisplayType.SHOW)
                             { 
-                                formGraphics.DrawString(text, fontCounter, BrushText, new RectangleF(graphPosition + (Options.HistorySize / 2) - (sizeString.Width / 2), ypos, sizeString.Width, maximumHeight), new StringFormat());
+                                formGraphics.DrawString(text, fontCounter, BrushText, new RectangleF(graphPosition + (GraphWidth / 2) - (sizeString.Width / 2), ypos, sizeString.Width, maximumHeight), new StringFormat());
                             }
                             //}
                             BrushText.Dispose();
@@ -550,11 +1003,11 @@ namespace TaskbarMonitor
                     }
 
 
-                    graphPosition += Options.HistorySize + 10;
+                    graphPosition += GraphWidth + CounterSpacing;
                     if (VerticalTaskbarMode && graphPosition >= this.Size.Width)
                     {
                         graphPosition = 0;
-                        graphPositionY += (maximumHeight + 10);
+                        graphPositionY += (maximumHeight + CounterSpacing);
                     }
 
                 }
@@ -578,36 +1031,37 @@ namespace TaskbarMonitor
             using (SolidBrush BrushBar = new SolidBrush(theme.BarColor))
             {
                 if (invertido)
-                    formGraphics.FillRectangle(BrushBar, new Rectangle(x + Options.HistorySize, maxH, 4, heightInt));
+                    formGraphics.FillRectangle(BrushBar, new Rectangle(x + GraphWidth, maxH, BarWidth, heightInt));
                 else
-                    formGraphics.FillRectangle(BrushBar, new Rectangle(x + Options.HistorySize, posInt, 4, heightInt));
+                    formGraphics.FillRectangle(BrushBar, new Rectangle(x + GraphWidth, posInt, BarWidth, heightInt));
             }
 
-            var initialGraphPosition = x + Options.HistorySize - info.History.Count;
+            // Stretch the history across the (DPI scaled) graph width.
+            var initialGraphPosition = x;
+            float step = info.History.Count > 1 ? (float)GraphWidth / (float)info.History.Count : 0f;
             Point[] points = new Point[info.History.Count + 2];
             int i = 0;
-            int inverter = invertido ? -1 : 1;
             foreach (var item in info.History)
             {
                 var heightItem = (item * maxH) / info.MaximumValue;
                 if (heightItem > Int32.MaxValue) height = Int32.MaxValue;
                 var convertido = Convert.ToInt32(Math.Round(heightItem));
-
+                int pointX = initialGraphPosition + (int)Math.Round(i * step);
 
                 if (invertido)
-                    points[i] = new Point(initialGraphPosition + i, 0 + convertido + y);
+                    points[i] = new Point(pointX, 0 + convertido + y);
                 else
-                    points[i] = new Point(initialGraphPosition + i, maxH - convertido + y);
+                    points[i] = new Point(pointX, maxH - convertido + y);
                 i++;
             }
             if (invertido)
             {
-                points[i] = new Point(initialGraphPosition + i, 0 + y);
+                points[i] = new Point(initialGraphPosition + GraphWidth, 0 + y);
                 points[i + 1] = new Point(initialGraphPosition, 0 + y);
             }
             else
             {
-                points[i] = new Point(initialGraphPosition + i, maxH + y);
+                points[i] = new Point(initialGraphPosition + GraphWidth, maxH + y);
                 points[i + 1] = new Point(initialGraphPosition, maxH + y);
             }
             using (SolidBrush BrushGraph = new SolidBrush(theme.getNthColor(2, invertido ? 1 : 0)))
@@ -656,11 +1110,12 @@ namespace TaskbarMonitor
                 int heightInt = Convert.ToInt32(Math.Round(height));
 
                 SolidBrush BrushBar = new SolidBrush(theme.BarColor);
-                formGraphics.FillRectangle(BrushBar, new Rectangle(x + Options.HistorySize, posInt, 4, heightInt));
+                formGraphics.FillRectangle(BrushBar, new Rectangle(x + GraphWidth, posInt, BarWidth, heightInt));
                 BrushBar.Dispose();
 
                 int i = 0;
-                var initialGraphPosition = x + Options.HistorySize - historySize;
+                var initialGraphPosition = x;
+                float step = historySize > 1 ? (float)GraphWidth / (float)historySize : 0f;
                 Point[] points = new Point[historySize + 2];
                 foreach (var item in info)
                 {
@@ -668,10 +1123,10 @@ namespace TaskbarMonitor
                     if (heightItem > Int32.MaxValue) heightItem = Int32.MaxValue;
                     var convertido = Convert.ToInt32(Math.Round(heightItem));
 
-                    points[i] = new Point(initialGraphPosition + i, maxH - convertido + y);
+                    points[i] = new Point(initialGraphPosition + (int)Math.Round(i * step), maxH - convertido + y);
                     i++;
                 }
-                points[i] = new Point(initialGraphPosition + i, maxH + y);
+                points[i] = new Point(initialGraphPosition + GraphWidth, maxH + y);
                 points[i + 1] = new Point(initialGraphPosition, maxH + y);
 
                 Brush brush = new SolidBrush(colors.ElementAt(w));
@@ -683,33 +1138,42 @@ namespace TaskbarMonitor
             }
         }
 
-        private static int GetTaskbarWidth()
-        {
-            return Screen.PrimaryScreen.Bounds.Width - Screen.PrimaryScreen.WorkingArea.Width;
-        }
-
-        private static int GetTaskbarHeight()
-        {
-            return Screen.PrimaryScreen.Bounds.Height - Screen.PrimaryScreen.WorkingArea.Height;
-        }
-
         private void SystemWatcherControl_MouseEnter(object sender, EventArgs e)
         {
             mouseOver = true;
 
             this.Invalidate();
+
+            if (!PreviewMode)
+                UpdateProcessUsage(PointToClient(Cursor.Position));
         }
 
         private void SystemWatcherControl_MouseLeave(object sender, EventArgs e)
         {
             mouseOver = false;
+            HideProcessUsage();
             this.Invalidate();
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+
+            if (PreviewMode)
+                return;
+
+            if (!mouseOver)
+                mouseOver = true;
+
+            UpdateProcessUsage(e.Location);
         }
         private System.Windows.Forms.Timer mousePollTimer;
         private bool lastMouseOver = false;
 
         private void StartMousePolling()
         {
+            StopMousePolling();
+
             mousePollTimer = new System.Windows.Forms.Timer();
             mousePollTimer.Interval = 50; // ms
             mousePollTimer.Tick += MousePollTimer_Tick;
@@ -744,7 +1208,168 @@ namespace TaskbarMonitor
                 lastMouseOver = false;
                 SystemWatcherControl_MouseLeave(this, EventArgs.Empty);
             }
+
+            if (isOver && !PreviewMode)
+                UpdateProcessUsage(PointToClient(cursorPos));
         }
+
+        private void UpdateProcessUsage(Point clientPoint)
+        {
+            if (PreviewMode || !mouseOver || this.IsDisposed || this.Disposing)
+            {
+                HideProcessUsage();
+                return;
+            }
+
+            CounterLayout layout = GetCounterLayout(clientPoint);
+            if (layout == null)
+            {
+                HideProcessUsage();
+                return;
+            }
+
+            if (!string.Equals(hoveredCounterName, layout.Name, StringComparison.Ordinal))
+            {
+                hoveredCounterName = layout.Name;
+                ShowProcessUsage(layout);
+            }
+            else if (processUsagePopup == null || !processUsagePopup.Visible)
+            {
+                ShowProcessUsage(layout);
+            }
+        }
+
+        private CounterLayout GetCounterLayout(Point clientPoint)
+        {
+            for (int i = 0; i < counterLayouts.Count; i++)
+            {
+                CounterLayout layout = counterLayouts[i];
+                if (layout.Bounds.Contains(clientPoint))
+                    return layout;
+            }
+
+            return null;
+        }
+
+        private CounterLayout FindCounterLayout(string name)
+        {
+            for (int i = 0; i < counterLayouts.Count; i++)
+            {
+                CounterLayout layout = counterLayouts[i];
+                if (string.Equals(layout.Name, name, StringComparison.Ordinal))
+                    return layout;
+            }
+
+            return null;
+        }
+
+        private void EnsureProcessUsageStarted()
+        {
+            if (processUsageService == null)
+                processUsageService = new ProcessUsageService();
+
+            if (!processUsageStarted)
+            {
+                processUsageService.Start();
+                processUsageStarted = true;
+            }
+
+            if (processUsageTimer == null)
+            {
+                processUsageTimer = new System.Windows.Forms.Timer();
+                processUsageTimer.Interval = 250;
+                processUsageTimer.Tick += ProcessUsageTimer_Tick;
+            }
+
+            if (!processUsageTimer.Enabled)
+                processUsageTimer.Start();
+        }
+
+        private void ShowProcessUsage(CounterLayout layout)
+        {
+            if (layout == null || string.IsNullOrEmpty(hoveredCounterName))
+                return;
+
+            EnsureProcessUsageStarted();
+
+            if (processUsagePopup == null)
+                processUsagePopup = new ProcessUsagePopup();
+
+            ProcessUsageSnapshot snapshot = processUsageService == null
+                ? null
+                : processUsageService.GetSnapshot(hoveredCounterName);
+            if (snapshot == null)
+            {
+                snapshot = ProcessUsageSnapshot.Loading(
+                    hoveredCounterName, ProcessUsageService.GetTitle(hoveredCounterName));
+            }
+
+            processUsagePopup.ShowSnapshot(snapshot, RectangleToScreen(layout.Bounds),
+                displayScale, defaultTheme);
+        }
+
+        private void ProcessUsageTimer_Tick(object sender, EventArgs e)
+        {
+            if (PreviewMode || !mouseOver || string.IsNullOrEmpty(hoveredCounterName))
+            {
+                HideProcessUsage();
+                return;
+            }
+
+            CounterLayout layout = FindCounterLayout(hoveredCounterName);
+            if (layout == null)
+            {
+                HideProcessUsage();
+                return;
+            }
+
+            ShowProcessUsage(layout);
+        }
+
+        private void HideProcessUsage()
+        {
+            if (processUsageTimer != null)
+                processUsageTimer.Stop();
+
+            if (processUsagePopup != null && processUsagePopup.Visible)
+            {
+                try { processUsagePopup.Hide(); } catch { }
+            }
+
+            if (processUsageService != null && processUsageStarted)
+            {
+                try { processUsageService.Stop(); } catch { }
+                processUsageStarted = false;
+            }
+
+            hoveredCounterName = null;
+        }
+
+        private void DisposeProcessUsage()
+        {
+            HideProcessUsage();
+
+            if (processUsageTimer != null)
+            {
+                processUsageTimer.Stop();
+                processUsageTimer.Tick -= ProcessUsageTimer_Tick;
+                processUsageTimer.Dispose();
+                processUsageTimer = null;
+            }
+
+            if (processUsageService != null)
+            {
+                try { processUsageService.Dispose(); } catch { }
+                processUsageService = null;
+            }
+
+            if (processUsagePopup != null)
+            {
+                try { processUsagePopup.Dispose(); } catch { }
+                processUsagePopup = null;
+            }
+        }
+
         protected override void WndProc(ref Message m)
         {            
             base.WndProc(ref m);

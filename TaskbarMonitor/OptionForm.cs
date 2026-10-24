@@ -108,12 +108,25 @@ namespace TaskbarMonitor
         private void Initialize()
         {
             initializing = true;
+
+            if (this.Options.CounterOptions == null)
+                this.Options.CounterOptions = new Dictionary<string, CounterOptions>();
+            if (this.Options.MonitorOptions == null)
+                this.Options.MonitorOptions = new Dictionary<string, MonitorOptions>();
+
             swcPreview.AttachMonitor(monitor);
 
-            this.editHistorySize.Value = this.Options.HistorySize;
-            this.editPollTime.Value = this.Options.PollTime;
+            this.editHistorySize.Value = Math.Min(this.editHistorySize.Maximum,
+                Math.Max(this.editHistorySize.Minimum, (decimal)this.Options.HistorySize));
+            this.editPollTime.Value = Math.Min(this.editPollTime.Maximum,
+                Math.Max(this.editPollTime.Minimum, (decimal)this.Options.PollTime));
             this.listThemeType.Text = this.Options.ThemeType.ToString();
-            this.listCounters.DataSource = this.Options.CounterOptions.OrderBy(x => x.Value.Order).Select(x=> x.Key).ToList();
+            var counterNames = this.Options.CounterOptions
+                .Where(x => x.Value != null && AvailableGraphTypes.ContainsKey(x.Key))
+                .OrderBy(x => x.Value.Order)
+                .Select(x => x.Key)
+                .ToList();
+            this.listCounters.DataSource = counterNames;
             var items = Enum.GetValues(typeof(CounterOptions.DisplayType)).OfType<CounterOptions.DisplayType>().ToList();
             if (BLL.WindowsInformation.IsWindows11())
             {
@@ -131,7 +144,17 @@ namespace TaskbarMonitor
 
             lblVersion.Text = "v" + Version.ToString(3);
 
-            ActiveCounter = this.Options.CounterOptions.First().Value;
+            ActiveCounter = (!string.IsNullOrEmpty(this.listCounters.Text) &&
+                             this.Options.CounterOptions.ContainsKey(this.listCounters.Text))
+                ? this.Options.CounterOptions[this.listCounters.Text]
+                : this.Options.CounterOptions
+                    .Where(x => x.Value != null && AvailableGraphTypes.ContainsKey(x.Key))
+                    .OrderBy(x => x.Value.Order)
+                    .Select(x => x.Value)
+                    .FirstOrDefault();
+            if (ActiveCounter == null)
+                ActiveCounter = new CounterOptions();
+
             UpdateForm();
             UpdateReplicateSettingsMenu();
             UpdateThemeOptions();
@@ -140,7 +163,12 @@ namespace TaskbarMonitor
             btnColorCurrentValueShadow.BackColor = this.Theme.TextShadowColor;
             btnColorTitle.BackColor = this.Theme.TitleColor;
             btnColorTitleShadow.BackColor = this.Theme.TitleShadowColor;
-            
+
+            if (ChosenTitleFont != null)
+                ChosenTitleFont.Dispose();
+            if (ChosenCurrentValueFont != null)
+                ChosenCurrentValueFont.Dispose();
+
             ChosenTitleFont = new Font(this.Theme.TitleFont, this.Theme.TitleSize, FontStyle.Bold);
             linkTitleFont.Text = ChosenTitleFont.Name + ", " + ChosenTitleFont.Size + "pt";
 
@@ -184,14 +212,31 @@ namespace TaskbarMonitor
             }
             else if (previewOptions.ThemeType == Options.ThemeList.AUTOMATIC)
             {
-                Color taskBarColour = BLL.Win32Api.GetColourAt(BLL.Win32Api.GetTaskbarPosition().Location);
-                if (taskBarColour.R + taskBarColour.G + taskBarColour.B > 382)
-                    previewTheme = GraphTheme.DefaultLightTheme();
-                else
+                try
+                {
+                    Color taskBarColour = BLL.Win32Api.GetColourAt(BLL.Win32Api.GetTaskbarPosition().Location);
+                    if (taskBarColour.R + taskBarColour.G + taskBarColour.B > 382)
+                        previewTheme = GraphTheme.DefaultLightTheme();
+                    else
+                        previewTheme = GraphTheme.DefaultDarkTheme();
+                }
+                catch (Exception ex)
+                {
+                    // Theme detection must never prevent the preview (or the
+                    // settings form) from working.
+                    System.Diagnostics.Debug.WriteLine("Unable to detect taskbar colour: " + ex);
                     previewTheme = GraphTheme.DefaultDarkTheme();
+                }
             }
 
-            swcPreview.ApplyOptions(previewOptions, previewTheme);
+            try
+            {
+                swcPreview.ApplyOptions(previewOptions, previewTheme);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine("Unable to update the preview: " + ex);
+            }
         }
 
         private void EditHistorySize_ValueChanged(object sender, EventArgs e)
@@ -317,6 +362,14 @@ namespace TaskbarMonitor
         private void UpdateForm()
         {
             initializing = true;
+            if (!AvailableGraphTypes.ContainsKey(this.listCounters.Text))
+            {
+                initializing = false;
+                buttonUp.Enabled = false;
+                buttonDown.Enabled = false;
+                return;
+            }
+
             this.listGraphType.DataSource = this.AvailableGraphTypes[listCounters.Text];
             initializing = false;
             this.listGraphType.Text = ActiveCounter.GraphType.ToString();
@@ -758,26 +811,34 @@ namespace TaskbarMonitor
             this.Close();
         }
 
-        private void buttonApply_Click(object sender, EventArgs e)
+        private void ApplyLiveOptions()
         {
             this.Options.CopyTo(this.OriginalOptions);
             this.Options.SaveToDisk();
 
             this.Theme.CopyTo(this.OriginalTheme);
             this.Theme.SaveToDisk();
-            manager.ApplyOptions(this.OriginalOptions);
-            //originalControl.ApplyOptions(this.OriginalOptions);
+
+            // Apply to the running monitor explicitly. On Windows 11 the
+            // manager also refreshes every taskbar control, but the deskband
+            // path has no manager entries, so this keeps the live counters in
+            // sync there as well.
+            if (this.monitor != null)
+                this.monitor.UpdateOptions(this.OriginalOptions);
+
+            if (this.manager != null)
+                this.manager.ApplyOptions(this.OriginalOptions);
+        }
+
+        private void buttonApply_Click(object sender, EventArgs e)
+        {
+            ApplyLiveOptions();
         }
 
         private void buttonOK_Click(object sender, EventArgs e)
         {
-            this.Options.CopyTo(this.OriginalOptions);
-            this.Options.SaveToDisk();
-
-            this.Theme.CopyTo(this.OriginalTheme);
-            this.Theme.SaveToDisk();
+            ApplyLiveOptions();
             this.Close();
-            manager.ApplyOptions(this.OriginalOptions);
         }
 
         

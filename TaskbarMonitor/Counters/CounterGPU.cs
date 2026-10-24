@@ -109,13 +109,14 @@ namespace TaskbarMonitor.Counters
 
         public new static bool IsAvailable()
         {
+            List<PerformanceCounter> gpuCounters = null;
             try
             {
 
                 var category = new PerformanceCounterCategory("GPU Engine");
                 var counterNames = category.GetInstanceNames();
 
-                List<PerformanceCounter> gpuCounters = counterNames
+                gpuCounters = counterNames
                                         .Where(counterName => counterName.EndsWith("engtype_3D"))
                                         .SelectMany(counterName => category.GetCounters(counterName))
                                         .Where(counter => counter.CounterName.Equals("Utilization Percentage"))
@@ -125,9 +126,20 @@ namespace TaskbarMonitor.Counters
 
                 return true;
             }
-            catch (InvalidOperationException ex)
+            catch (Exception ex)
             {
+                Debug.WriteLine("GPU counters are not available: " + ex.Message);
                 return false;
+            }
+            finally
+            {
+                if (gpuCounters != null)
+                {
+                    foreach (var counter in gpuCounters)
+                    {
+                        try { counter.Dispose(); } catch { }
+                    }
+                }
             }
         }        
 
