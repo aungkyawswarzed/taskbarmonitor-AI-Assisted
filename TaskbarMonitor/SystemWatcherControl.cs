@@ -1290,6 +1290,13 @@ namespace TaskbarMonitor
             if (layout == null || string.IsNullOrEmpty(hoveredCounterName))
                 return;
 
+            // Keep hover details off fullscreen and borderless fullscreen games.
+            if (BLL.Win32Api.IsForegroundFullscreen())
+            {
+                HideProcessUsage();
+                return;
+            }
+
             EnsureProcessUsageStarted();
 
             if (processUsagePopup == null)

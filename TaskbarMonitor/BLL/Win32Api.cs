@@ -164,6 +164,35 @@ namespace TaskbarMonitor.BLL
         [DllImport("user32.dll", SetLastError = false)]
         static extern IntPtr GetDesktopWindow();
 
+        [DllImport("user32.dll")]
+        static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        static extern IntPtr GetShellWindow();
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        static extern bool IsZoomed(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        static extern IntPtr MonitorFromWindow(IntPtr hWnd, uint dwFlags);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
+
+        [DllImport("shell32.dll")]
+        static extern int SHQueryUserNotificationState(out int state);
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct MONITORINFO
+        {
+            public int cbSize;
+            public RECT rcMonitor;
+            public RECT rcWork;
+            public uint dwFlags;
+        }
+
         [Flags]
         internal enum SetWinEventHookParameter
         {
@@ -249,6 +278,62 @@ namespace TaskbarMonitor.BLL
             myRect.Width = rct.right - rct.left;
             myRect.Height = rct.bottom - rct.top;
             return myRect;
+        }
+
+        private const uint MONITOR_DEFAULTTONEAREST = 2;
+        private const uint WS_CAPTION = 0x00C00000;
+        private const int QUNS_BUSY = 2;
+        private const int QUNS_RUNNING_D3D_FULL_SCREEN = 3;
+        private const int QUNS_APP = 7;
+
+        /// <summary>
+        /// True when the foreground window is a fullscreen or borderless
+        /// fullscreen app (a game), so hover overlays must stay hidden.
+        /// </summary>
+        public static bool IsForegroundFullscreen()
+        {
+            try
+            {
+                // Exclusive fullscreen games often shrink or hide their window,
+                // so the shell's notification state is the reliable signal there.
+                int state;
+                if (SHQueryUserNotificationState(out state) == 0 &&
+                    (state == QUNS_BUSY || state == QUNS_RUNNING_D3D_FULL_SCREEN || state == QUNS_APP))
+                {
+                    return true;
+                }
+
+                IntPtr foreground = GetForegroundWindow();
+                if (foreground == IntPtr.Zero || foreground == GetShellWindow())
+                    return false;
+
+                // A max/restore desktop window still shows its title bar; a
+                // borderless game either has no caption or is not maximized.
+                if (IsZoomed(foreground) &&
+                    (GetWindowLong(foreground, GWLParameter.GWL_STYLE) & WS_CAPTION) != 0)
+                {
+                    return false;
+                }
+
+                RECT window;
+                if (!GetWindowRect(foreground, out window))
+                    return false;
+
+                var monitor = new MONITORINFO();
+                monitor.cbSize = Marshal.SizeOf(monitor);
+                IntPtr monitorHandle = MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST);
+                if (monitorHandle == IntPtr.Zero || !GetMonitorInfo(monitorHandle, ref monitor))
+                    return false;
+
+                return window.left <= monitor.rcMonitor.left &&
+                       window.top <= monitor.rcMonitor.top &&
+                       window.right >= monitor.rcMonitor.right &&
+                       window.bottom >= monitor.rcMonitor.bottom;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
 

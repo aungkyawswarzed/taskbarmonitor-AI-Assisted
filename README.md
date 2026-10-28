@@ -14,7 +14,7 @@ A Windows taskbar monitor that displays live graphs for CPU, memory, disk, netwo
 
 ## What this fork adds
 
-Version **0.5.6.1** includes:
+Version **0.5.6.2** includes:
 
 - **Per-counter hover details** — hover a counter to see the top five resource users, grouped by executable name.
   - CPU: top processes by CPU usage.
@@ -24,6 +24,7 @@ Version **0.5.6.1** includes:
   - GPU 3D: top processes by GPU engine utilization.
   - GPU MEM: top processes by GPU memory usage.
 - A non-activating popup that does not steal focus from the current application.
+- Hover details stay hidden while a fullscreen or borderless fullscreen game is in the foreground.
 - Popup placement for bottom, top, left, and right taskbars, including auto-hide and multi-monitor setups.
 - Per-monitor DPI awareness and taskbar sizing fixes for high-DPI and high-resolution displays.
 - Safer configuration loading and saving, including recovery from corrupt configuration files.

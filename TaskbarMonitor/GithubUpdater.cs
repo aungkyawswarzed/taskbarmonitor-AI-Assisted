@@ -35,7 +35,7 @@ namespace TaskbarMonitor
                 var result = client.GetAsync(GetURL()).Result;
                 
                 var html = await result.Content.ReadAsStringAsync();
-                //<meta property="og:url" content="/aungkyawswarzed/taskbarmonitor-AI-Assisted/releases/tag/v0.5.6.1">
+                //<meta property="og:url" content="/aungkyawswarzed/taskbarmonitor-AI-Assisted/releases/tag/v0.5.6.2">
                 //var tag = @"<meta property=""og:url"" content=""/" + this.user + @"/" + this.project + @"/releases/tag/v" + version.ToString(fieldCount) + @"""";
                 Regex reg = new Regex(@"<meta\sproperty=""og:url""\scontent=""\/" + this.user + @"\/" + this.project + @"\/releases\/tag\/v([\d\.]+)""");
                 var ret = reg.Match(html);
